@@ -27,6 +27,7 @@ def start_receiver(shared_counts):
                             enc_block = data.split("ENC{")[1].split("}")[0]
                             enc_data = {kv.split(':')[0]: int(kv.split(':')[1]) for kv in enc_block.split(';') if ':' in kv}
                             shared_counts.update(enc_data)
+                            # ⚙️ Encoder vẫn in để debug dễ
                             print(f"[ENCODER] {shared_counts}")
 
                         if "LIMITS{" in data:

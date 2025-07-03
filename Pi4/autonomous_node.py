@@ -1,12 +1,12 @@
 # autonomous_node.py
-import os, math, json, socket, threading
+import os, math, json, socket, threading, time
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from motor_control import move_vehicle, stop_all
 from receiver import limit_active
-import time
+from odometry import Odometry
 
 class LiDARNode(Node):
     def __init__(self, counts):
@@ -19,6 +19,8 @@ class LiDARNode(Node):
         self.moving = False
         self.last_action_time = self.get_clock().now()
 
+        # Thêm odometry
+        self.odometry = Odometry()
         self.connect_to_pi5()
         self.ping_thread = threading.Thread(target=self.ping_loop, daemon=True)
         self.ping_thread.start()
@@ -26,11 +28,11 @@ class LiDARNode(Node):
     def connect_to_pi5(self):
         while True:
             try:
-                print("[Pi4] 🔄 Đang cố kết nối tới Pi5...")
+                print("[Pi4] 🔄 Đang kết nối tới Pi5...")
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.connect(("192.168.100.2", 8899))
                 self.sock.settimeout(0.1)
-                print("[Pi4] ✅ Kết nối lại thành công – Gửi LiDAR đến Pi5")
+                print("[Pi4] ✅ Kết nối thành công – Gửi LiDAR + Pose đến Pi5")
                 break
             except:
                 time.sleep(2)
@@ -49,7 +51,7 @@ class LiDARNode(Node):
                 except socket.timeout:
                     pass
                 if now - self.last_pong_time > 3:
-                    print("[Pi4] ❌ Mất kết nối với Pi5 – Dừng xe")
+                    print("[Pi4] ❌ Mất kết nối Pi5 – Dừng xe")
                     stop_all()
                     self.sock.close()
                     self.connect_to_pi5()
@@ -62,19 +64,26 @@ class LiDARNode(Node):
         if limit_active:
             return
 
+        # Cập nhật vị trí từ Encoder
+        self.odometry.update(self.counts)
+        pose = self.odometry.get_pose()
+
+        # Gửi LiDAR + vị trí robot về Pi5
         try:
             self.sock.sendall((json.dumps({
                 "ranges": list(msg.ranges),
                 "angle_min": msg.angle_min,
-                "angle_increment": msg.angle_increment
+                "angle_increment": msg.angle_increment,
+                "pose": pose
             }) + "\n").encode())
         except:
             self.sock.close()
             self.connect_to_pi5()
 
+        # === VẪN GIỮ CODE né vật cản như cũ ===
         size, scale, center = 40, 0.1, 20
         map_array = np.full((size, size), '.', dtype=str)
-        THRESH_CLEAR = 1.2
+        THRESH_CLEAR = 1.5
 
         free_l, free_c, free_r, valid_points = [], [], [], 0
 
@@ -87,11 +96,11 @@ class LiDARNode(Node):
             if 0 <= x < size and 0 <= y < size:
                 map_array[y][x] = '#'
             if 60 <= deg <= 120:
-                free_r.append(distance)   # 🔄 trước là free_l
+                free_r.append(distance)
             elif -70 <= deg <= 70:
                 free_c.append(distance)
             elif -120 <= deg <= -60:
-                free_l.append(distance)   # 🔄 trước là free_r
+                free_l.append(distance)
             valid_points += 1
 
         if valid_points == 0:
@@ -108,20 +117,19 @@ class LiDARNode(Node):
         for row in map_array[::-1]:
             print(" ".join(row))
         print(f"[DEBUG] Trái={mean_l:.2f} | Giữa={mean_c:.2f} | Phải={mean_r:.2f}")
+        print(f"[POSE] X={pose['x']:.2f} m | Y={pose['y']:.2f} m | θ={math.degrees(pose['theta']):.1f}°")
 
         now = self.get_clock().now()
         if (now - self.last_action_time).nanoseconds / 1e9 > 0.5 and not self.moving:
             if mean_c > THRESH_CLEAR:
                 self.safe_move("forward")
             elif mean_l > mean_r and mean_l > THRESH_CLEAR / 2:
-                self.safe_move("left")   # 🔄 trái bị che → né phải
+                self.safe_move("left")
             elif mean_r > mean_l and mean_r > THRESH_CLEAR / 2:
-                self.safe_move("right")    # 🔄 phải bị che → né trái
+                self.safe_move("right")
             else:
                 self.safe_move("backward")
             self.last_action_time = now
-
-
 
     def safe_move(self, direction):
         if self.moving:
@@ -132,7 +140,6 @@ class LiDARNode(Node):
             self.moving = False
         threading.Thread(target=worker, daemon=True).start()
 
-
 def main(args=None):
     rclpy.init(args=args)
     counts = {'E1': 0, 'E2': 0, 'E3': 0, 'E4': 0}
@@ -140,7 +147,6 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
